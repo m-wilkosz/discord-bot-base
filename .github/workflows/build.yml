@@ -6,7 +6,7 @@ name: Execute Build
 on:
   push:
     branches:
-      - master
+      - main
       - feature/**
       - hotfix/**
       - bugfix/**
