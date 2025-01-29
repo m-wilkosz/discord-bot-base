@@ -1,8 +1,8 @@
 # Abstracto
 
 ![Build](https://github.com/Sheldan/abstracto/workflows/Execute%20Build/badge.svg)
-[![GitHub license](https://img.shields.io/github/license/Sheldan/abstracto)](https://github.com/Sheldan/abstracto/blob/master/LICENSE)
-
+[![GitHub license](https://img.shields.io/github/license/Sheldan/abstracto)](https://github.com/Sheldan/abstracto/blob/master/LICENSE)\
+[![](https://skillicons.dev/icons?i=java,spring,docker,postgres,discord,bots)](https://skillicons.dev)
 
 Abstracto represents a framework to be used as a basis for a Discord bot. It uses [JDA](https://github.com/DV8FromTheWorld/JDA/) as an API wrapper underneath
 and provides an extensive tool set to create new commands and a wide range of commands out of the box.
@@ -22,9 +22,7 @@ This repository does not provide the full functionality in order to start a disc
 * [Liquibase](https://github.com/liquibase/liquibase) is used to manage changes to the database
 
 ## Documentation
-A detailed documentation of the pure form of Abstracto including the terminology and commands in HTML form is available [here](https://sheldan.github.io/abstracto-docs/current). The PDF is available [here](https://sheldan.github.io/abstracto-docs/current/documentation.pdf)
-If you want to view the documentation to an earlier released version you need to append the desired version to the URL. The current version will be available aforementioned URL, but it is not right now, because Abstracto has not been released yet.
-
+A detailed documentation of the pure form of Abstracto including the terminology and commands in PDF form is available [here](https://drive.google.com/file/d/18bFhg5__bVBZXOItJb8m3uxN_kTalHpk/view).
 
 ## Issues
 If you find any issue, feel free to create a GitHub issue.
