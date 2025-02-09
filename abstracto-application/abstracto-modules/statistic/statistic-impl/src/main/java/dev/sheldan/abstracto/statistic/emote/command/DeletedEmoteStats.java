@@ -6,653 +6,104 @@ import dev.sheldan.abstracto.core.command.config.HelpInfo;
 import dev.sheldan.abstracto.core.command.config.Parameter;
 import dev.sheldan.abstracto.core.command.execution.CommandResult;
 import dev.sheldan.abstracto.core.config.FeatureDefinition;
-import dev.sheldan.abstracto.core.interaction.InteractionService;
 import dev.sheldan.abstracto.core.interaction.slash.SlashCommandConfig;
+import dev.sheldan.abstracto.core.interaction.slash.SlashCommandService;
 import dev.sheldan.abstracto.core.interaction.slash.parameter.SlashCommandParameterService;
-import dev.sheldan.abstracto.core.models.database.AServer;
-import dev.sheldan.abstracto.core.service.PaginatorService;
-import dev.sheldan.abstracto.core.service.management.ServerManagementService;
-import dev.sheldan.abstracto.core.utils.FutureUtils;
-import dev.sheldan.abstracto.core.utils.ParseUtils;
+import dev.sheldan.abstracto.core.models.ServerSpecificId;
 import dev.sheldan.abstracto.statistic.config.StatisticFeatureDefinition;
 import dev.sheldan.abstracto.statistic.config.StatisticSlashCommandNames;
-import dev.sheldan.abstracto.statistic.emote.command.parameter.UsedEmoteTypeParameter;
 import dev.sheldan.abstracto.statistic.emote.config.EmoteTrackingModuleDefinition;
-import dev.sheldan.abstracto.statistic.emote.model.EmoteStatsModel;
-import dev.sheldan.abstracto.statistic.emote.service.UsedEmoteService;
-import java.util.Arrays;
-import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
+import dev.sheldan.abstracto.statistic.emote.exception.TrackedEmoteNotFoundException;
+import dev.sheldan.abstracto.statistic.emote.model.database.TrackedEmote;
+import dev.sheldan.abstracto.statistic.emote.service.TrackedEmoteService;
+import dev.sheldan.abstracto.statistic.emote.service.management.TrackedEmoteManagementService;
+import java.util.concurrent.CompletableFuture;
+import net.dv8tion.jda.api.entities.emoji.CustomEmoji;
+import net.dv8tion.jda.api.entities.emoji.Emoji;
 import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
+import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
-import java.time.Duration;
-import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 
 /**
- * This command will show the emote statistics for all deleted emotes in the current server. There is an optional
- * {@link Duration} parameter, which will define the amount of time to retrieve the stats for. If not provided, all stats will be shown.
+ * This command completely deletes one individual {@link TrackedEmote} and all of its usages from the database. This command cannot be undone.
  */
 @Component
-@Slf4j
-public class DeletedEmoteStats extends AbstractConditionableCommand {
-
-    public static final String DELETED_EMOTE_STATS_COMMAND_NAME = "deletedEmoteStats";
-    @Autowired
-    private UsedEmoteService usedEmoteService;
+public class DeleteTrackedEmote extends AbstractConditionableCommand {
 
     @Autowired
-    private PaginatorService paginatorService;
+    private TrackedEmoteManagementService trackedEmoteManagementService;
 
     @Autowired
-    private ServerManagementService serverManagementService;
+    private TrackedEmoteService trackedEmoteService;
 
     @Autowired
     private SlashCommandParameterService slashCommandParameterService;
 
     @Autowired
-    private InteractionService interactionService;
+    private SlashCommandService slashCommandService;
 
-    public static final String EMOTE_STATS_STATIC_DELETED_RESPONSE = "deletedEmoteStats_static_response";
-    public static final String EMOTE_STATS_ANIMATED_DELETED_RESPONSE = "deletedEmoteStats_animated_response";
-    private static final String DELETED_EMOTE_STATS_PERIOD = "period";
-    private static final String DELETED_EMOTE_STATS_USED_EMOTE_TYPE = "type";
+    private static final String DELETE_TRACKED_EMOTE_TRACKED_EMOTE = "trackedEmote";
+    private static final String DELETE_TRACKED_EMOTE_COMMAND_NAME = "deleteTrackedEmote";
+    private static final String DELETE_TRACKED_EMOTE_RESPONSE = "deleteTrackedEmote_response";
 
     @Override
     public CompletableFuture<CommandResult> executeSlash(SlashCommandInteractionEvent event) {
-        UsedEmoteTypeParameter typeEnum;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event)) {
-            String type = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event, String.class);
-            typeEnum = UsedEmoteTypeParameter.valueOf(type);
+        String emote = slashCommandParameterService.getCommandOption(DELETE_TRACKED_EMOTE_TRACKED_EMOTE, event, String.class);
+        Emoji emoji = slashCommandParameterService.loadEmoteFromString(emote, event.getGuild());
+        if(emoji instanceof CustomEmoji) {
+            Long emoteId = ((CustomEmoji) emoji).getIdLong();
+            return createResponse(event, emoteId);
+        } else if(StringUtils.isNumeric(emote)) {
+            return createResponse(event, Long.parseLong(emote));
         } else {
-            typeEnum = null;
+            throw new TrackedEmoteNotFoundException();
         }
-        Instant startTime;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_PERIOD, event)) {
-            String durationString = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_PERIOD, event, Duration.class, String.class);
-            Duration durationSince = ParseUtils.parseDuration(durationString);
-            startTime = Instant.now().minus(durationSince);
-        } else {
-            startTime = Instant.EPOCH;
-        }
-        AServer server = serverManagementService.loadServer(event.getGuild());
-        EmoteStatsModel emoteStatsModel = usedEmoteService.getDeletedEmoteStatsForServerSince(server, startTime, UsedEmoteTypeParameter.convertToUsedEmoteType(typeEnum));
-        List<CompletableFuture<Void>> messagePromises = new ArrayList<>();
-        return event.deferReply().submit().thenCompose(interactionHook -> {
-            // only show embed if static emote stats are available
-            if(!emoteStatsModel.getStaticEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} static emotes since {}.", emoteStatsModel.getStaticEmotes().size(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_STATIC_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // only show embed if animated emote stats are available
-            if(!emoteStatsModel.getAnimatedEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} animated emotes since {}.", emoteStatsModel.getAnimatedEmotes(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_ANIMATED_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // show an embed if no emote stats are available indicating so
-            if(!emoteStatsModel.areStatsAvailable()) {
-                log.info("No delete emote stats available for guild {} since {}.", event.getGuild().getIdLong(), startTime);
-                return FutureUtils.toSingleFutureGeneric(interactionService.sendMessageToInteraction(EmoteStats.EMOTE_STATS_NO_STATS_AVAILABLE, new Object(), interactionHook))
-                    .thenApply(unused -> CommandResult.fromSuccess());
-            }
-            return FutureUtils.toSingleFutureGeneric(messagePromises)
-                .thenApply(unused -> CommandResult.fromIgnored());
-        });
+    }
+
+    private CompletableFuture<CommandResult> createResponse(SlashCommandInteractionEvent event, Long emoteId) {
+        ServerSpecificId serverEmoteId = new ServerSpecificId(event.getGuild().getIdLong(), emoteId);
+        TrackedEmote trackedEmote = trackedEmoteManagementService.loadByTrackedEmoteServer(serverEmoteId);
+        trackedEmoteService.deleteTrackedEmote(trackedEmote);
+        return slashCommandService.completeConfirmableCommand(event, DELETE_TRACKED_EMOTE_RESPONSE);
     }
 
     @Override
     public CommandConfiguration getConfiguration() {
         List<Parameter> parameters = new ArrayList<>();
-        Parameter periodParameter = Parameter
+        Parameter trackedEmoteParameter = Parameter
                 .builder()
-                .name(DELETED_EMOTE_STATS_PERIOD)
+                .name(DELETE_TRACKED_EMOTE_TRACKED_EMOTE)
                 .templated(true)
-                .optional(true)
-                .type(Duration.class)
+                .type(TrackedEmote.class)
                 .build();
-        parameters.add(periodParameter);
-
-        List<String> emoteTypes = Arrays
-            .stream(UsedEmoteTypeParameter.values())
-            .map(Enum::name)
-            .collect(Collectors.toList());
-
-        Parameter typeParameter = Parameter
-            .builder()
-            .name(DELETED_EMOTE_STATS_USED_EMOTE_TYPE)
-            .templated(true)
-            .slashCommandOnly(true)
-            .optional(true)
-            .choices(emoteTypes)
-            .type(String.class)
-            .build();
-
-        parameters.add(typeParameter);
-
-        SlashCommandConfig slashCommandConfig = SlashCommandConfig
-            .builder()
-            .enabled(true)
-            .rootCommandName(StatisticSlashCommandNames.STATISTIC)
-            .groupName("emotestats")
-            .commandName("deleted")
-            .build();
+        parameters.add(trackedEmoteParameter);
 
         HelpInfo helpInfo = HelpInfo
             .builder()
             .templated(true)
             .build();
 
-        return CommandConfiguration.builder()
-                .name(DELETED_EMOTE_STATS_COMMAND_NAME)
-                .module(EmoteTrackingModuleDefinition.EMOTE_TRACKING)
-                .templated(true)
-                .async(true)
-                .slashCommandConfig(slashCommandConfig)
-                .supportsEmbedException(true)
-                .slashCommandOnly(true)
-                .causesReaction(true)
-                .parameters(parameters)
-                .help(helpInfo)
-                .build();
-    }
-
-    @Override
-    public FeatureDefinition getFeature() {
-        return StatisticFeatureDefinition.EMOTE_TRACKING;
-    }
-}package dev.sheldan.abstracto.statistic.emote.command;
-
-import dev.sheldan.abstracto.core.command.condition.AbstractConditionableCommand;
-import dev.sheldan.abstracto.core.command.config.CommandConfiguration;
-import dev.sheldan.abstracto.core.command.config.HelpInfo;
-import dev.sheldan.abstracto.core.command.config.Parameter;
-import dev.sheldan.abstracto.core.command.execution.CommandResult;
-import dev.sheldan.abstracto.core.config.FeatureDefinition;
-import dev.sheldan.abstracto.core.interaction.InteractionService;
-import dev.sheldan.abstracto.core.interaction.slash.SlashCommandConfig;
-import dev.sheldan.abstracto.core.interaction.slash.parameter.SlashCommandParameterService;
-import dev.sheldan.abstracto.core.models.database.AServer;
-import dev.sheldan.abstracto.core.service.PaginatorService;
-import dev.sheldan.abstracto.core.service.management.ServerManagementService;
-import dev.sheldan.abstracto.core.utils.FutureUtils;
-import dev.sheldan.abstracto.core.utils.ParseUtils;
-import dev.sheldan.abstracto.statistic.config.StatisticFeatureDefinition;
-import dev.sheldan.abstracto.statistic.config.StatisticSlashCommandNames;
-import dev.sheldan.abstracto.statistic.emote.command.parameter.UsedEmoteTypeParameter;
-import dev.sheldan.abstracto.statistic.emote.config.EmoteTrackingModuleDefinition;
-import dev.sheldan.abstracto.statistic.emote.model.EmoteStatsModel;
-import dev.sheldan.abstracto.statistic.emote.service.UsedEmoteService;
-import java.util.Arrays;
-import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
-import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-
-/**
- * This command will show the emote statistics for all deleted emotes in the current server. There is an optional
- * {@link Duration} parameter, which will define the amount of time to retrieve the stats for. If not provided, all stats will be shown.
- */
-@Component
-@Slf4j
-public class DeletedEmoteStats extends AbstractConditionableCommand {
-
-    public static final String DELETED_EMOTE_STATS_COMMAND_NAME = "deletedEmoteStats";
-    @Autowired
-    private UsedEmoteService usedEmoteService;
-
-    @Autowired
-    private PaginatorService paginatorService;
-
-    @Autowired
-    private ServerManagementService serverManagementService;
-
-    @Autowired
-    private SlashCommandParameterService slashCommandParameterService;
-
-    @Autowired
-    private InteractionService interactionService;
-
-    public static final String EMOTE_STATS_STATIC_DELETED_RESPONSE = "deletedEmoteStats_static_response";
-    public static final String EMOTE_STATS_ANIMATED_DELETED_RESPONSE = "deletedEmoteStats_animated_response";
-    private static final String DELETED_EMOTE_STATS_PERIOD = "period";
-    private static final String DELETED_EMOTE_STATS_USED_EMOTE_TYPE = "type";
-
-    @Override
-    public CompletableFuture<CommandResult> executeSlash(SlashCommandInteractionEvent event) {
-        UsedEmoteTypeParameter typeEnum;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event)) {
-            String type = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event, String.class);
-            typeEnum = UsedEmoteTypeParameter.valueOf(type);
-        } else {
-            typeEnum = null;
-        }
-        Instant startTime;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_PERIOD, event)) {
-            String durationString = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_PERIOD, event, Duration.class, String.class);
-            Duration durationSince = ParseUtils.parseDuration(durationString);
-            startTime = Instant.now().minus(durationSince);
-        } else {
-            startTime = Instant.EPOCH;
-        }
-        AServer server = serverManagementService.loadServer(event.getGuild());
-        EmoteStatsModel emoteStatsModel = usedEmoteService.getDeletedEmoteStatsForServerSince(server, startTime, UsedEmoteTypeParameter.convertToUsedEmoteType(typeEnum));
-        List<CompletableFuture<Void>> messagePromises = new ArrayList<>();
-        return event.deferReply().submit().thenCompose(interactionHook -> {
-            // only show embed if static emote stats are available
-            if(!emoteStatsModel.getStaticEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} static emotes since {}.", emoteStatsModel.getStaticEmotes().size(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_STATIC_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // only show embed if animated emote stats are available
-            if(!emoteStatsModel.getAnimatedEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} animated emotes since {}.", emoteStatsModel.getAnimatedEmotes(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_ANIMATED_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // show an embed if no emote stats are available indicating so
-            if(!emoteStatsModel.areStatsAvailable()) {
-                log.info("No delete emote stats available for guild {} since {}.", event.getGuild().getIdLong(), startTime);
-                return FutureUtils.toSingleFutureGeneric(interactionService.sendMessageToInteraction(EmoteStats.EMOTE_STATS_NO_STATS_AVAILABLE, new Object(), interactionHook))
-                    .thenApply(unused -> CommandResult.fromSuccess());
-            }
-            return FutureUtils.toSingleFutureGeneric(messagePromises)
-                .thenApply(unused -> CommandResult.fromIgnored());
-        });
-    }
-
-    @Override
-    public CommandConfiguration getConfiguration() {
-        List<Parameter> parameters = new ArrayList<>();
-        Parameter periodParameter = Parameter
-                .builder()
-                .name(DELETED_EMOTE_STATS_PERIOD)
-                .templated(true)
-                .optional(true)
-                .type(Duration.class)
-                .build();
-        parameters.add(periodParameter);
-
-        List<String> emoteTypes = Arrays
-            .stream(UsedEmoteTypeParameter.values())
-            .map(Enum::name)
-            .collect(Collectors.toList());
-
-        Parameter typeParameter = Parameter
-            .builder()
-            .name(DELETED_EMOTE_STATS_USED_EMOTE_TYPE)
-            .templated(true)
-            .slashCommandOnly(true)
-            .optional(true)
-            .choices(emoteTypes)
-            .type(String.class)
-            .build();
-
-        parameters.add(typeParameter);
-
         SlashCommandConfig slashCommandConfig = SlashCommandConfig
             .builder()
             .enabled(true)
-            .rootCommandName(StatisticSlashCommandNames.STATISTIC)
-            .groupName("emotestats")
-            .commandName("deleted")
-            .build();
-
-        HelpInfo helpInfo = HelpInfo
-            .builder()
-            .templated(true)
+            .rootCommandName(StatisticSlashCommandNames.STATISTIC_INTERNAL)
+            .groupName("manage")
+            .commandName("deletetrackedemote")
             .build();
 
         return CommandConfiguration.builder()
-                .name(DELETED_EMOTE_STATS_COMMAND_NAME)
+                .name(DELETE_TRACKED_EMOTE_COMMAND_NAME)
                 .module(EmoteTrackingModuleDefinition.EMOTE_TRACKING)
                 .templated(true)
-                .async(true)
-                .slashCommandConfig(slashCommandConfig)
                 .supportsEmbedException(true)
-                .slashCommandOnly(true)
                 .causesReaction(true)
-                .parameters(parameters)
-                .help(helpInfo)
-                .build();
-    }
-
-    @Override
-    public FeatureDefinition getFeature() {
-        return StatisticFeatureDefinition.EMOTE_TRACKING;
-    }
-}package dev.sheldan.abstracto.statistic.emote.command;
-
-import dev.sheldan.abstracto.core.command.condition.AbstractConditionableCommand;
-import dev.sheldan.abstracto.core.command.config.CommandConfiguration;
-import dev.sheldan.abstracto.core.command.config.HelpInfo;
-import dev.sheldan.abstracto.core.command.config.Parameter;
-import dev.sheldan.abstracto.core.command.execution.CommandResult;
-import dev.sheldan.abstracto.core.config.FeatureDefinition;
-import dev.sheldan.abstracto.core.interaction.InteractionService;
-import dev.sheldan.abstracto.core.interaction.slash.SlashCommandConfig;
-import dev.sheldan.abstracto.core.interaction.slash.parameter.SlashCommandParameterService;
-import dev.sheldan.abstracto.core.models.database.AServer;
-import dev.sheldan.abstracto.core.service.PaginatorService;
-import dev.sheldan.abstracto.core.service.management.ServerManagementService;
-import dev.sheldan.abstracto.core.utils.FutureUtils;
-import dev.sheldan.abstracto.core.utils.ParseUtils;
-import dev.sheldan.abstracto.statistic.config.StatisticFeatureDefinition;
-import dev.sheldan.abstracto.statistic.config.StatisticSlashCommandNames;
-import dev.sheldan.abstracto.statistic.emote.command.parameter.UsedEmoteTypeParameter;
-import dev.sheldan.abstracto.statistic.emote.config.EmoteTrackingModuleDefinition;
-import dev.sheldan.abstracto.statistic.emote.model.EmoteStatsModel;
-import dev.sheldan.abstracto.statistic.emote.service.UsedEmoteService;
-import java.util.Arrays;
-import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
-import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-
-/**
- * This command will show the emote statistics for all deleted emotes in the current server. There is an optional
- * {@link Duration} parameter, which will define the amount of time to retrieve the stats for. If not provided, all stats will be shown.
- */
-@Component
-@Slf4j
-public class DeletedEmoteStats extends AbstractConditionableCommand {
-
-    public static final String DELETED_EMOTE_STATS_COMMAND_NAME = "deletedEmoteStats";
-    @Autowired
-    private UsedEmoteService usedEmoteService;
-
-    @Autowired
-    private PaginatorService paginatorService;
-
-    @Autowired
-    private ServerManagementService serverManagementService;
-
-    @Autowired
-    private SlashCommandParameterService slashCommandParameterService;
-
-    @Autowired
-    private InteractionService interactionService;
-
-    public static final String EMOTE_STATS_STATIC_DELETED_RESPONSE = "deletedEmoteStats_static_response";
-    public static final String EMOTE_STATS_ANIMATED_DELETED_RESPONSE = "deletedEmoteStats_animated_response";
-    private static final String DELETED_EMOTE_STATS_PERIOD = "period";
-    private static final String DELETED_EMOTE_STATS_USED_EMOTE_TYPE = "type";
-
-    @Override
-    public CompletableFuture<CommandResult> executeSlash(SlashCommandInteractionEvent event) {
-        UsedEmoteTypeParameter typeEnum;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event)) {
-            String type = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event, String.class);
-            typeEnum = UsedEmoteTypeParameter.valueOf(type);
-        } else {
-            typeEnum = null;
-        }
-        Instant startTime;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_PERIOD, event)) {
-            String durationString = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_PERIOD, event, Duration.class, String.class);
-            Duration durationSince = ParseUtils.parseDuration(durationString);
-            startTime = Instant.now().minus(durationSince);
-        } else {
-            startTime = Instant.EPOCH;
-        }
-        AServer server = serverManagementService.loadServer(event.getGuild());
-        EmoteStatsModel emoteStatsModel = usedEmoteService.getDeletedEmoteStatsForServerSince(server, startTime, UsedEmoteTypeParameter.convertToUsedEmoteType(typeEnum));
-        List<CompletableFuture<Void>> messagePromises = new ArrayList<>();
-        return event.deferReply().submit().thenCompose(interactionHook -> {
-            // only show embed if static emote stats are available
-            if(!emoteStatsModel.getStaticEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} static emotes since {}.", emoteStatsModel.getStaticEmotes().size(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_STATIC_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // only show embed if animated emote stats are available
-            if(!emoteStatsModel.getAnimatedEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} animated emotes since {}.", emoteStatsModel.getAnimatedEmotes(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_ANIMATED_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // show an embed if no emote stats are available indicating so
-            if(!emoteStatsModel.areStatsAvailable()) {
-                log.info("No delete emote stats available for guild {} since {}.", event.getGuild().getIdLong(), startTime);
-                return FutureUtils.toSingleFutureGeneric(interactionService.sendMessageToInteraction(EmoteStats.EMOTE_STATS_NO_STATS_AVAILABLE, new Object(), interactionHook))
-                    .thenApply(unused -> CommandResult.fromSuccess());
-            }
-            return FutureUtils.toSingleFutureGeneric(messagePromises)
-                .thenApply(unused -> CommandResult.fromIgnored());
-        });
-    }
-
-    @Override
-    public CommandConfiguration getConfiguration() {
-        List<Parameter> parameters = new ArrayList<>();
-        Parameter periodParameter = Parameter
-                .builder()
-                .name(DELETED_EMOTE_STATS_PERIOD)
-                .templated(true)
-                .optional(true)
-                .type(Duration.class)
-                .build();
-        parameters.add(periodParameter);
-
-        List<String> emoteTypes = Arrays
-            .stream(UsedEmoteTypeParameter.values())
-            .map(Enum::name)
-            .collect(Collectors.toList());
-
-        Parameter typeParameter = Parameter
-            .builder()
-            .name(DELETED_EMOTE_STATS_USED_EMOTE_TYPE)
-            .templated(true)
-            .slashCommandOnly(true)
-            .optional(true)
-            .choices(emoteTypes)
-            .type(String.class)
-            .build();
-
-        parameters.add(typeParameter);
-
-        SlashCommandConfig slashCommandConfig = SlashCommandConfig
-            .builder()
-            .enabled(true)
-            .rootCommandName(StatisticSlashCommandNames.STATISTIC)
-            .groupName("emotestats")
-            .commandName("deleted")
-            .build();
-
-        HelpInfo helpInfo = HelpInfo
-            .builder()
-            .templated(true)
-            .build();
-
-        return CommandConfiguration.builder()
-                .name(DELETED_EMOTE_STATS_COMMAND_NAME)
-                .module(EmoteTrackingModuleDefinition.EMOTE_TRACKING)
-                .templated(true)
-                .async(true)
+                .slashCommandOnly(true)
                 .slashCommandConfig(slashCommandConfig)
-                .supportsEmbedException(true)
-                .slashCommandOnly(true)
-                .causesReaction(true)
-                .parameters(parameters)
-                .help(helpInfo)
-                .build();
-    }
-
-    @Override
-    public FeatureDefinition getFeature() {
-        return StatisticFeatureDefinition.EMOTE_TRACKING;
-    }
-}package dev.sheldan.abstracto.statistic.emote.command;
-
-import dev.sheldan.abstracto.core.command.condition.AbstractConditionableCommand;
-import dev.sheldan.abstracto.core.command.config.CommandConfiguration;
-import dev.sheldan.abstracto.core.command.config.HelpInfo;
-import dev.sheldan.abstracto.core.command.config.Parameter;
-import dev.sheldan.abstracto.core.command.execution.CommandResult;
-import dev.sheldan.abstracto.core.config.FeatureDefinition;
-import dev.sheldan.abstracto.core.interaction.InteractionService;
-import dev.sheldan.abstracto.core.interaction.slash.SlashCommandConfig;
-import dev.sheldan.abstracto.core.interaction.slash.parameter.SlashCommandParameterService;
-import dev.sheldan.abstracto.core.models.database.AServer;
-import dev.sheldan.abstracto.core.service.PaginatorService;
-import dev.sheldan.abstracto.core.service.management.ServerManagementService;
-import dev.sheldan.abstracto.core.utils.FutureUtils;
-import dev.sheldan.abstracto.core.utils.ParseUtils;
-import dev.sheldan.abstracto.statistic.config.StatisticFeatureDefinition;
-import dev.sheldan.abstracto.statistic.config.StatisticSlashCommandNames;
-import dev.sheldan.abstracto.statistic.emote.command.parameter.UsedEmoteTypeParameter;
-import dev.sheldan.abstracto.statistic.emote.config.EmoteTrackingModuleDefinition;
-import dev.sheldan.abstracto.statistic.emote.model.EmoteStatsModel;
-import dev.sheldan.abstracto.statistic.emote.service.UsedEmoteService;
-import java.util.Arrays;
-import java.util.stream.Collectors;
-import lombok.extern.slf4j.Slf4j;
-import net.dv8tion.jda.api.events.interaction.command.SlashCommandInteractionEvent;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
-
-import java.time.Duration;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-
-/**
- * This command will show the emote statistics for all deleted emotes in the current server. There is an optional
- * {@link Duration} parameter, which will define the amount of time to retrieve the stats for. If not provided, all stats will be shown.
- */
-@Component
-@Slf4j
-public class DeletedEmoteStats extends AbstractConditionableCommand {
-
-    public static final String DELETED_EMOTE_STATS_COMMAND_NAME = "deletedEmoteStats";
-    @Autowired
-    private UsedEmoteService usedEmoteService;
-
-    @Autowired
-    private PaginatorService paginatorService;
-
-    @Autowired
-    private ServerManagementService serverManagementService;
-
-    @Autowired
-    private SlashCommandParameterService slashCommandParameterService;
-
-    @Autowired
-    private InteractionService interactionService;
-
-    public static final String EMOTE_STATS_STATIC_DELETED_RESPONSE = "deletedEmoteStats_static_response";
-    public static final String EMOTE_STATS_ANIMATED_DELETED_RESPONSE = "deletedEmoteStats_animated_response";
-    private static final String DELETED_EMOTE_STATS_PERIOD = "period";
-    private static final String DELETED_EMOTE_STATS_USED_EMOTE_TYPE = "type";
-
-    @Override
-    public CompletableFuture<CommandResult> executeSlash(SlashCommandInteractionEvent event) {
-        UsedEmoteTypeParameter typeEnum;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event)) {
-            String type = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_USED_EMOTE_TYPE, event, String.class);
-            typeEnum = UsedEmoteTypeParameter.valueOf(type);
-        } else {
-            typeEnum = null;
-        }
-        Instant startTime;
-        if(slashCommandParameterService.hasCommandOption(DELETED_EMOTE_STATS_PERIOD, event)) {
-            String durationString = slashCommandParameterService.getCommandOption(DELETED_EMOTE_STATS_PERIOD, event, Duration.class, String.class);
-            Duration durationSince = ParseUtils.parseDuration(durationString);
-            startTime = Instant.now().minus(durationSince);
-        } else {
-            startTime = Instant.EPOCH;
-        }
-        AServer server = serverManagementService.loadServer(event.getGuild());
-        EmoteStatsModel emoteStatsModel = usedEmoteService.getDeletedEmoteStatsForServerSince(server, startTime, UsedEmoteTypeParameter.convertToUsedEmoteType(typeEnum));
-        List<CompletableFuture<Void>> messagePromises = new ArrayList<>();
-        return event.deferReply().submit().thenCompose(interactionHook -> {
-            // only show embed if static emote stats are available
-            if(!emoteStatsModel.getStaticEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} static emotes since {}.", emoteStatsModel.getStaticEmotes().size(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_STATIC_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // only show embed if animated emote stats are available
-            if(!emoteStatsModel.getAnimatedEmotes().isEmpty()) {
-                log.debug("Deleted emote stats has {} animated emotes since {}.", emoteStatsModel.getAnimatedEmotes(), startTime);
-                messagePromises.add(paginatorService.sendPaginatorToInteraction(EMOTE_STATS_ANIMATED_DELETED_RESPONSE, emoteStatsModel, interactionHook));
-            }
-            // show an embed if no emote stats are available indicating so
-            if(!emoteStatsModel.areStatsAvailable()) {
-                log.info("No delete emote stats available for guild {} since {}.", event.getGuild().getIdLong(), startTime);
-                return FutureUtils.toSingleFutureGeneric(interactionService.sendMessageToInteraction(EmoteStats.EMOTE_STATS_NO_STATS_AVAILABLE, new Object(), interactionHook))
-                    .thenApply(unused -> CommandResult.fromSuccess());
-            }
-            return FutureUtils.toSingleFutureGeneric(messagePromises)
-                .thenApply(unused -> CommandResult.fromIgnored());
-        });
-    }
-
-    @Override
-    public CommandConfiguration getConfiguration() {
-        List<Parameter> parameters = new ArrayList<>();
-        Parameter periodParameter = Parameter
-                .builder()
-                .name(DELETED_EMOTE_STATS_PERIOD)
-                .templated(true)
-                .optional(true)
-                .type(Duration.class)
-                .build();
-        parameters.add(periodParameter);
-
-        List<String> emoteTypes = Arrays
-            .stream(UsedEmoteTypeParameter.values())
-            .map(Enum::name)
-            .collect(Collectors.toList());
-
-        Parameter typeParameter = Parameter
-            .builder()
-            .name(DELETED_EMOTE_STATS_USED_EMOTE_TYPE)
-            .templated(true)
-            .slashCommandOnly(true)
-            .optional(true)
-            .choices(emoteTypes)
-            .type(String.class)
-            .build();
-
-        parameters.add(typeParameter);
-
-        SlashCommandConfig slashCommandConfig = SlashCommandConfig
-            .builder()
-            .enabled(true)
-            .rootCommandName(StatisticSlashCommandNames.STATISTIC)
-            .groupName("emotestats")
-            .commandName("deleted")
-            .build();
-
-        HelpInfo helpInfo = HelpInfo
-            .builder()
-            .templated(true)
-            .build();
-
-        return CommandConfiguration.builder()
-                .name(DELETED_EMOTE_STATS_COMMAND_NAME)
-                .module(EmoteTrackingModuleDefinition.EMOTE_TRACKING)
-                .templated(true)
-                .async(true)
-                .slashCommandConfig(slashCommandConfig)
-                .supportsEmbedException(true)
-                .slashCommandOnly(true)
-                .causesReaction(true)
+                .requiresConfirmation(true)
                 .parameters(parameters)
                 .help(helpInfo)
                 .build();
