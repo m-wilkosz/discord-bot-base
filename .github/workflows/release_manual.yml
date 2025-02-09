@@ -1,7 +1,6 @@
-name: Publishes a new version of abstracto
+name: Creates a new release of abstracto
 on: workflow_dispatch
 permissions:
-  packages: write
   contents: write
 jobs:
   publish:
@@ -9,16 +8,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: master
+          ref: main
       - name: Set up JDK
         uses: actions/setup-java@v3
         with:
           distribution: 'corretto'
           java-version: 17
-      - name: Setup node
-        uses: actions/setup-node@v3
-        with:
-          node-version: '21.x'
       - name: Load current version
         id: version
         working-directory: ./abstracto-application
@@ -29,50 +24,3 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           title: Release of version ${{ env.version }}
-      - name: Release maven packages
-        uses: qcastel/github-actions-maven-release@v1.12.41
-        env:
-          JAVA_HOME: /usr/lib/jvm/java-17-openjdk/
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          maven-project-folder: "abstracto-application/"
-          git-release-bot-name: "release-bot"
-          git-release-bot-email: "release-bot@sheldan.dev"
-          release-branch-name: master
-          maven-args: "-Dmaven.javadoc.skip=true -s settings.xml -DskipTests"
-          access-token: ${{ secrets.GITHUB_TOKEN }}
-      - name: Install node dependencies and build
-        working-directory: ./ui/experience-tracking
-        run: npm ci
-      - name: Build ui application
-        working-directory: ./ui/experience-tracking
-        run: npm run build
-      - name: Copy built UI
-        run: cp -R ui/experience-tracking/build/* python/components/experience-tracking/resources/templates/experience/leaderboards/
-      - name: Login to Harbor
-        uses: docker/login-action@v2
-        with:
-          registry: harbor.sheldan.dev
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_TOKEN }}
-      - name: Update .env version
-        run:
-          sed -i '2s/.*/VERSION=${{ env.version }}/' .env
-      - name: Load env file
-        id: dotenv
-        uses: falti/dotenv-action@v1.0.4
-        with:
-          path: .env
-      - name: Build and push Docker containers
-        run: docker compose build && docker compose push
-        env:
-          REGISTRY_PREFIX: ${{ steps.dotenv.outputs.registry_prefix }}
-          VERSION: ${{ steps.dotenv.outputs.version }}
-      - name: Fix file permissions
-        run:
-          sudo chmod -R ugo+rwX . # https://github.com/actions/checkout/issues/164
-      - name: Commit updated versions
-        uses: EndBug/add-and-commit@v9
-        with:
-          author_name: "release-bot"
-          author_email: "release-bot@sheldan.dev"
